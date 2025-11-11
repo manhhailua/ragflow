@@ -27,6 +27,14 @@ from nltk import word_tokenize
 from nltk.stem import PorterStemmer, WordNetLemmatizer
 from common.file_utils import get_project_base_directory
 
+# Try to import underthesea for Vietnamese tokenization
+try:
+    from underthesea import word_tokenize as vietnamese_word_tokenize
+    UNDERTHESEA_AVAILABLE = True
+except ImportError:
+    UNDERTHESEA_AVAILABLE = False
+    logging.warning("underthesea not available, falling back to NLTK for Vietnamese tokenization")
+
 
 class RagTokenizer:
     def key_(self, line):
@@ -322,13 +330,32 @@ class RagTokenizer:
     def tokenize(self, line):
         line = re.sub(r"\W+", " ", line)
         line = self._strQ2B(line).lower()
+        
+        # convert traditional (used in Taiwan, Hongkong,...) to simplified (China, Singapore) chinese
+        # simplified have fewer stroke => easy to write
+        # make it normalize and consistency
+        # Note: Vietnamese doesn't need this conversion as it uses Latin script
         line = self._tradi2simp(line)
 
+        # return list of tuple (text, is_chinese)
         arr = self._split_by_lang(line)
         res = []
         for L,lang in arr:
             if not lang:
-                res.extend([self.stemmer.stem(self.lemmatizer.lemmatize(t)) for t in word_tokenize(L)])
+                # Use underthesea for Vietnamese text if available
+                if UNDERTHESEA_AVAILABLE and is_vietnamese(L):
+                    try:
+                        # Vietnamese tokenization doesn't need stemming/lemmatization
+                        # as Vietnamese is an analytic language with minimal inflection
+                        tokens = vietnamese_word_tokenize(L)
+                        # Join multi-word tokens with underscore for consistency
+                        res.extend([t.replace(' ', '_') for t in tokens])
+                    except Exception as e:
+                        logging.warning(f"Vietnamese tokenization failed, falling back to NLTK: {e}")
+                        res.extend([self.stemmer.stem(self.lemmatizer.lemmatize(t)) for t in word_tokenize(L)])
+                else:
+                    # Use NLTK for English and other languages
+                    res.extend([self.stemmer.stem(self.lemmatizer.lemmatize(t)) for t in word_tokenize(L)])
                 continue
             if len(L) < 2 or re.match(
                     r"[a-z\.-]+$", L) or re.match(r"[0-9\.-]+$", L):
@@ -336,6 +363,8 @@ class RagTokenizer:
                 continue
 
             # use maxforward for the first time
+            # these algorithm designed for languages without explicit word boundaries (chinese, japanese,...)
+            # english/vietnamese handled separately above with NLTK/underthesea
             tks, s = self.maxForward_(L)
             tks1, s1 = self.maxBackward_(L)
             if self.DEBUG:
@@ -437,6 +466,38 @@ def is_chinese(s):
         return True
     else:
         return False
+
+
+def is_vietnamese(text):
+    """
+    Detect if text contains Vietnamese characters.
+    Vietnamese uses Latin alphabet with special diacritics.
+    Unicode ranges for Vietnamese diacritics: \u00C0-\u1EF9
+    """
+    if not text:
+        return False
+    
+    # Vietnamese specific characters with diacritics
+    vietnamese_chars = (
+        'à', 'á', 'ả', 'ã', 'ạ', 'ă', 'ằ', 'ắ', 'ẳ', 'ẵ', 'ặ',
+        'â', 'ầ', 'ấ', 'ẩ', 'ẫ', 'ậ', 'đ', 'è', 'é', 'ẻ', 'ẽ', 'ẹ',
+        'ê', 'ề', 'ế', 'ể', 'ễ', 'ệ', 'ì', 'í', 'ỉ', 'ĩ', 'ị',
+        'ò', 'ó', 'ỏ', 'õ', 'ọ', 'ô', 'ồ', 'ố', 'ổ', 'ỗ', 'ộ',
+        'ơ', 'ờ', 'ớ', 'ở', 'ỡ', 'ợ', 'ù', 'ú', 'ủ', 'ũ', 'ụ',
+        'ư', 'ừ', 'ứ', 'ử', 'ữ', 'ự', 'ỳ', 'ý', 'ỷ', 'ỹ', 'ỵ'
+    )
+    
+    # Check if text contains Vietnamese characters
+    text_lower = text.lower()
+    vietnamese_char_count = sum(1 for char in text_lower if char in vietnamese_chars or char == 'đ')
+    
+    # If more than 5% of characters are Vietnamese-specific, consider it Vietnamese
+    # This threshold helps distinguish from other Latin-based languages
+    if len(text) > 0 and vietnamese_char_count > 0:
+        ratio = vietnamese_char_count / len(text)
+        return ratio > 0.02  # 2% threshold to be conservative
+    
+    return False
 
 
 def is_number(s):
